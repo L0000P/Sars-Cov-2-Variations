@@ -93,8 +93,7 @@ for file_name in os.listdir(input_folder):
     rename_partitions(diff_temp_dir, output_folder)
 
 cleanup_temp_dir(temp_dir)
-# After processing all files, merge CSV files in each country directory
 merge_and_clean(output_folder)
 
-print("Operazione completata.")
+print("Operation Completed.")
 spark.stop()
