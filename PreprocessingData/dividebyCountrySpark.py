@@ -7,37 +7,33 @@ import urllib.parse
 import re
 import subprocess
 
-def process_dataframe(file_path, diff_temp_dir):
+def process_dataframe(file_path, diff_temp_dir):    # Process dataframe and save it to a temporary directory
     print(f"Processing file {file_path}")
-    df = spark.read.format('csv').option('header', 'true').option('delimiter', '\t').option('inferSchema', 'true').load(file_path)
-    df = df.toDF(*(c.replace('.', '_') for c in df.columns))
+    df = spark.read.format('csv').option('header', 'true').option('delimiter', '\t').option('inferSchema', 'true').load(file_path) # Load CSV file
+    df = df.toDF(*(c.replace('.', '_') for c in df.columns))    # Replace dots in column names with underscores
     
-    clade_index = df.columns.index("Country") + 6 if "sample" in df.columns else df.columns.index("Country") + 5
-    mutation_columns = df.columns[clade_index + 1:]
+    clade_index = df.columns.index("Country") + 6 if "sample" in df.columns else df.columns.index("Country") + 5    # Find the index of the column containing the clade
+    mutation_columns = df.columns[clade_index + 1:] # Get the list of mutation columns
 
-    df = df.withColumn("Mutations", array([expr(f"CASE WHEN `{col}` = 1 THEN '{col}' END") for col in mutation_columns]))
+    df = df.withColumn("Mutations", array([expr(f"CASE WHEN `{col}` = 1 THEN '{col}' END") for col in mutation_columns])) # Create a new column containing an array of mutations
 
-    df_final = df.select("Country", "Geo_Location", col(df.columns[clade_index]).alias("Clade"), "Mutations")
-    df_final = df_final.withColumn("Mutations", concat_ws(",", "Mutations"))
-    df_final.repartition("Country").write.partitionBy("Country").option("header", "true").format("csv").mode("overwrite").save(diff_temp_dir)
-    df.unpersist()
+    df_final = df.select("Country", "Geo_Location", col(df.columns[clade_index]).alias("Clade"), "Mutations") # Select only the columns we need
+    df_final = df_final.withColumn("Mutations", concat_ws(",", "Mutations")) # Concatenate the array of mutations into a string
+    df_final.repartition("Country").write.partitionBy("Country").option("header", "true").format("csv").mode("overwrite").save(diff_temp_dir) # Save the dataframe partitioned by country
+    df.unpersist() # Unpersist the dataframe to free memory
 
-def safe_mkdirs(path):
+def safe_mkdirs(path): # Create a directory if it does not exist
     try:
         os.makedirs(path, exist_ok=True)
     except OSError as e:
         logging.error(f"Could not create directory {path}: {e}")
         raise
 
-def rename_partitions(src_dir, dst_dir):
+def rename_partitions(src_dir, dst_dir): # Rename the partitions to use the country name
     for subdir in os.listdir(src_dir):
         if subdir.startswith('Country='):
-            # Decodifica URL per gestire correttamente i caratteri speciali come %3A
             country_encoded = subdir.replace('Country=', '')
             country_decoded = urllib.parse.unquote(country_encoded)
-            
-            # Sostituisci la virgola e altri caratteri non desiderati con underscore
-            # e rimuovi gli spazi extra
             country_sanitized = re.sub(r'[^\w\s]', '_', country_decoded)
             country_sanitized = re.sub(r'\s+', '_', country_sanitized)
             
@@ -49,25 +45,26 @@ def rename_partitions(src_dir, dst_dir):
                 dst_file_path = os.path.join(country_path, file)
                 shutil.move(src_file_path, dst_file_path)
 
-def cleanup_temp_dir(temp_dir):
+
+def cleanup_temp_dir(temp_dir): # Clean up the temporary directory
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
     os.makedirs(temp_dir, exist_ok=True)
     
-def merge_and_clean(cartella_output):
-    for country_dir in os.listdir(cartella_output):
+def merge_and_clean(output_folder): # Merge CSV files in each country directory and clean up the temporary directories
+    for country_dir in os.listdir(output_folder):
         print(f"Merge {country_dir}...")
-        full_path = os.path.join(cartella_output, country_dir)
+        full_path = os.path.join(output_folder, country_dir)
         if os.path.isdir(full_path):
-            cmd_merge = f'copy /b "{full_path}\\part*.csv" "{cartella_output}\\{country_dir}.csv"'
+            cmd_merge = f'copy /b "{full_path}\\part*.csv" "{output_folder}\\{country_dir}.csv"'
             subprocess.call(cmd_merge, shell=True)
             cmd_del = f'del "{full_path}\\part*.csv"'
             subprocess.call(cmd_del, shell=True)
             shutil.rmtree(full_path)
 
-cartella_input = "matrici_ncbi_2021_2022"
-cartella_output = "Countries"
-temp_dir = "temp"
+input_folder= "../matrici_ncbi_2021_2022"
+output_folder = "../Countries"
+temp_dir = "../temp"
 
 if os.path.exists(temp_dir):
     shutil.rmtree(temp_dir)
@@ -84,21 +81,20 @@ spark = SparkSession.builder \
     .config("spark.local.dir", temp_dir) \
     .getOrCreate()
 
-os.makedirs(cartella_output, exist_ok=True)
+os.makedirs(output_folder, exist_ok=True)
 
-
-for file_name in os.listdir(cartella_input):
+for file_name in os.listdir(input_folder):
     spark.catalog.clearCache()
     
-    file_path = os.path.join(cartella_input, file_name)
+    file_path = os.path.join(input_folder, file_name)
     diff_temp_dir = os.path.join(temp_dir, file_name)
 
     process_dataframe(file_path, diff_temp_dir)
-    rename_partitions(diff_temp_dir, cartella_output)
+    rename_partitions(diff_temp_dir, output_folder)
 
 cleanup_temp_dir(temp_dir)
 # After processing all files, merge CSV files in each country directory
-merge_and_clean(cartella_output)
+merge_and_clean(output_folder)
 
 print("Operazione completata.")
 spark.stop()
