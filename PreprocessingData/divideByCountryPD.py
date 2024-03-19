@@ -6,18 +6,17 @@ import re
 def process_dataframe(file_path, output_dir):   # Process dataframe
     print(f"Processing file {file_path}")
     df = pd.read_csv(file_path, delimiter='\t', header=0, low_memory=False) # Read csv file
-    df.columns = [c.replace('.', '_') for c in df.columns] # Replace '.' with '_' in column names
     
     clade_index = df.columns.get_loc("clade")   # Get index of clade column and mutation columns
     mutation_columns = df.columns[clade_index + 1:] # Get all columns after clade column (mutation columns)
     
     df['Mutations'] = df.apply(lambda row: ','.join([col for col in mutation_columns if row[col] == 1]), axis=1) # Calculate mutations
     
-    df_final = df[["Country", "Geo_Location", df.columns[clade_index], "Mutations"]]    # Select relevant columns
-    df_final.columns = ["Country", "Geo_Location", "Clade", "Mutations"]    # Rename columns
+    df['Geo_Location'] = df['Geo_Location'].apply(lambda x: x.split(',')[0] if pd.notnull(x) else x) # Truncate Geo_Location
     
-    for country, group in df_final.groupby("Country"):  # Group by country
-        country = country.split(',')[0]
+    df = df[["Country", "Geo_Location", df.columns[clade_index], "Mutations"]]    # Select relevant columns
+    
+    for country, group in df.groupby("Country"):  # Group by country
         country_sanitized = re.sub(r'[^\w\s]', '_', country)
         country_sanitized = re.sub(r'\s+', '_', country_sanitized)
         
@@ -35,7 +34,7 @@ def cleanup_dir(dir_path):  # Clean up directory
     os.makedirs(dir_path, exist_ok=True)
     
 input_folder = "../matrici_ncbi_2021_2022"
-output_folder = "../Countries"
+output_folder = "CountriesPD"
 
 cleanup_dir(output_folder)
 
