@@ -2,8 +2,11 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 import os
-import seaborn as sns
 import gc
+import seaborn as sns
+from pyclustering.cluster.cure import cure
+from scipy.sparse import issparse
+from scipy.cluster.hierarchy import dendrogram, linkage
 from scipy.sparse import csr_matrix
 from sklearn.cluster import AgglomerativeClustering, DBSCAN, OPTICS, HDBSCAN, KMeans
 from sklearn_extra.cluster import KMedoids
@@ -11,10 +14,12 @@ from sklearn.decomposition import TruncatedSVD, PCA
 from sklearn.impute import SimpleImputer
 
 class Clusterizer:
-    def __init__(self, clt_key="km", sample_frac=0.5, num_perm=128): # Constructor
-        self.clusters_type = {"km": KMeans, "ka": KMedoids, "gc": AgglomerativeClustering, "db": DBSCAN, "op": OPTICS, "hdb": HDBSCAN} # Supported clustering types
+    def __init__(self, clt_key="km", sample_frac=0.5): # Constructor
+        self.clusters_type = {"km": KMeans, "ka": KMedoids, 
+                              "gc": AgglomerativeClustering, "db": DBSCAN, 
+                              "op": OPTICS, "hdb": HDBSCAN,
+                              "cc": cure} # Supported clustering types
         self.sample_frac = sample_frac # Fraction of samples to use
-        self.num_perm = num_perm # Number of permutations for the hashing trick
         if clt_key not in self.clusters_type: # Check if the clustering type is supported
             raise ValueError(f"Clustering type {clt_key} is not supported.")
         self.clt_key = clt_key # Clustering type
@@ -73,10 +78,6 @@ class Clusterizer:
         jaccard_distance = 1 - jaccard_similarity # Calculate the Jaccard distance
 
         return jaccard_distance
-    
-    def process_csv_files(self, input_folder, plot_folder):
-        for file_name in filter(lambda name: name.endswith('.csv'), os.listdir(input_folder)): # Iterate over the CSV files
-            self.process_file(input_folder, plot_folder, file_name) # Process the file
 
     def process_file(self, input_folder, plot_folder, file_name): # Process the file
         print(f"Processing {file_name} using {self.clt_key.upper()}...") # Print the file name
@@ -99,14 +100,19 @@ class Clusterizer:
         X_sparse = self.mutations_to_sparse_matrix(mutations_list, all_mutations) # Convert mutations to a sparse matrix
         distance_matrix = self.calculate_jaccard_distance(X_sparse) # Calculate the Jaccard distance
         
-        print(f"Clustering {sanitized_file_name}...") 
-        labels, num_clusters = self.apply_clustering(df, distance_matrix) # Apply clustering
-        
-        if labels is not None:
-            print(f"Plotting {sanitized_file_name}...") # Print plot message
-            self.plot_results(distance_matrix, labels, num_clusters, plot_folder, sanitized_file_name, df) # Plot the results
-        else:
-            print(f"Skipping clustering for {sanitized_file_name} due to insufficient data.")   # Print skip message
+        if self.clt_key == "gc": # If the clustering type is Agglomerative Clustering
+            print(f"Clustering {sanitized_file_name} using Agglomerative Clustering...")
+            clade_labels = df['Clade'].values.tolist() # Get the clade labels
+            self.plot_dendrogram(distance_matrix, clade_labels, plot_folder, sanitized_file_name) # Plot the dendrogram
+        else:            
+            labels, num_clusters = self.apply_clustering(df, distance_matrix) # Apply clustering
+            
+            print(f"Clustering {sanitized_file_name}...") 
+            if labels is not None:
+                print(f"Plotting {sanitized_file_name}...") # Print plot message
+                self.plot_results(distance_matrix, labels, plot_folder, sanitized_file_name, df) # Plot the results
+            else:
+                print(f"Skipping clustering for {sanitized_file_name} due to insufficient data.")   # Print skip message
 
     def apply_clustering(self, df, distance_matrix): # Apply clustering
         num_clusters, num_samples = self.prepare_clustering(df, distance_matrix) # Prepare clustering
@@ -125,22 +131,33 @@ class Clusterizer:
     def perform_clustering(self, distance_matrix, num_clusters): # Perform clustering
         svd_result = self.apply_svd(distance_matrix) # Apply SVD
         if svd_result is not None: # If the SVD result is not None
-            num_samples = svd_result.shape[0] # Get the number of samples
-            model = self.clusters_type[self.clt_key]() # Get the clustering model
             
-            if self.clt_key == "op": # If the clustering type is OPTICS
-                min_samples = min(5, num_samples) # Get the minimum number of samples
-                model.set_params(min_samples=min_samples) # Set the minimum number of samples
+            if self.clt_key == "cc": # If the clustering type is CURE
+                cure_instance = cure(svd_result.tolist(), number_cluster=num_clusters) # Get the CURE instance
+                cure_instance.process() # Process the CURE instance
+                clusters = cure_instance.get_clusters() # Get the clusters
+                labels = [0] * len(svd_result) # Initialize the labels
+                for cluster_idx, cluster in enumerate(clusters): # Iterate over the clusters
+                    for index in cluster: # Iterate over the cluster indices
+                        labels[index] = cluster_idx # Set the label
+                return labels, num_clusters # Return the labels and the number of clusters
+            else:
+                num_samples = svd_result.shape[0] # Get the number of samples
+                model = self.clusters_type[self.clt_key]() # Get the clustering model
+                
+                if self.clt_key == "op": # If the clustering type is OPTICS
+                    min_samples = min(5, num_samples) # Get the minimum number of samples
+                    model.set_params(min_samples=min_samples) # Set the minimum number of samples
 
-            elif self.clt_key == "hdb": # If the clustering type is HDBSCAN
-                min_samples = min(5, num_samples) # Get the minimum number of samples
-                min_cluster_size = min(5, num_samples)  # Get the minimum cluster size
-                model = self.clusters_type[self.clt_key](min_samples=min_samples, min_cluster_size=min_cluster_size) # Get the clustering model
+                if self.clt_key == "hdb": # If the clustering type is HDBSCAN
+                    min_samples = min(5, num_samples) # Get the minimum number of samples
+                    min_cluster_size = min(5, num_samples)  # Get the minimum cluster size
+                    model = self.clusters_type[self.clt_key](min_samples=min_samples, min_cluster_size=min_cluster_size) # Get the clustering model
 
-            elif self.clt_key in ["km", "ka"]: # If the clustering type is KMeans or KMedoids
-                model = self.clusters_type[self.clt_key](n_clusters=min(num_clusters, num_samples)) # Get the clustering model
+                if self.clt_key in ["km", "ka"]: # If the clustering type is KMeans or KMedoids
+                    model = self.clusters_type[self.clt_key](n_clusters=min(num_clusters, num_samples)) # Get the clustering model
 
-            return model.fit_predict(svd_result), num_clusters # Return the model prediction and the number of clusters
+                return model.fit_predict(svd_result), num_clusters # Return the model prediction and the number of clusters
         return None, num_clusters  # Return None and the number of clusters
 
     def apply_svd(self, distance_matrix): # Apply SVD
@@ -151,7 +168,7 @@ class Clusterizer:
             print(f"Error in SVD: {e}") # Print the error
             return None # Return None
 
-    def plot_results(self, distance_matrix, labels, num_clusters, plot_folder, file_name, df): # Plot the results
+    def plot_results(self, distance_matrix, labels, plot_folder, file_name, df): # Plot the results
         if not self.check_min_points(labels): # Check if there are enough points to plot
             print(f"Not enough points to plot for {file_name}.") # Print the message
             return # Return
@@ -184,15 +201,69 @@ class Clusterizer:
             cluster_to_clade[cluster] = most_common_clade # Add the cluster to clade mapping
         return cluster_to_clade # Return the cluster to clade mapping
 
-    def create_scatter_plot(self, pca_result, clade_labels, file_name, plot_folder): # Create the scatter plot
-        plt.figure(figsize=(10, 8)) # Set the figure size
-        sns.scatterplot(x=pca_result[:, 0], y=pca_result[:, 1], hue=clade_labels, legend='full', palette='viridis', s=50, alpha=0.6, edgecolor='k') # Create the scatter plot
-        plt.title(f'Clustering Results for {file_name}') # Set the title
-        plt.legend(title='Clade', bbox_to_anchor=(1.05, 1), loc='upper left') # Set the legend
-        plt.tight_layout() # Set the layout
-        plt.savefig(os.path.join(plot_folder, file_name)) # Save the plot
-        plt.close() # Close the plot
+
+    def create_scatter_plot(self, pca_result, clade_labels, file_name, plot_folder):
+        plt.figure(figsize=(10, 8))  # Set the figure size
+
+        clade_labels = np.array(clade_labels) # Convert to numpy array
         
-        del pca_result # Delete pca_result
-        del clade_labels # Delete clade_labels
-        gc.collect() # Garbage collect
+        unique_labels = np.unique(clade_labels) # Get the unique labels
+        palette = sns.color_palette("hsv", n_colors=len(unique_labels)) # Get the color palette
+        markers = ['o', 'v', '^', '<', '>', 's', 'p', '*', 'h', 'H', 'D', 'd'] # Lista di markers
+        
+        # Plot points
+        for i, label in enumerate(unique_labels): # For each unique label
+            idx = clade_labels == label # Get the indices
+            sns.scatterplot(x=pca_result[idx, 0], y=pca_result[idx, 1], # Plot the scatter plot
+                            color=palette[i], label=label,  
+                            marker=markers[i % len(markers)],
+                            s=50,  
+                            alpha=0.8,
+                            edgecolor='k', linewidth=1)
+        
+        plt.title(f'Clustering Results for {file_name}')  # Set Title
+        plt.legend(title='Clade', bbox_to_anchor=(1.05, 1), loc='upper left')  # Set Legend
+        plt.tight_layout()  # Optimizes the plot
+        plt.savefig(os.path.join(plot_folder, file_name))  # Save the plot
+        plt.close()  # Close Plot
+
+        # Clear memory
+        del pca_result, clade_labels  
+        gc.collect()
+    
+    def plot_dendrogram(self, distance_matrix, clade_labels, plot_folder, file_name, max_d=1.0, max_samples=7):
+        if distance_matrix.size == 0: # Check if the distance matrix is empty
+            print("Distance Matrix Empty. Skip Plotting ")
+            return
+
+        if issparse(distance_matrix): # Check if the distance matrix is sparse
+            distance_matrix_dense = distance_matrix.todense()
+        else:
+            distance_matrix_dense = distance_matrix
+            
+        if distance_matrix_dense.shape[0] > max_samples: # Check if the number of samples is greater than the maximum samples
+            indices = np.random.choice(distance_matrix_dense.shape[0], size=max_samples, replace=False)
+            sampled_matrix = distance_matrix_dense[indices][:, indices]
+            sampled_clade_labels = [clade_labels[i] for i in indices]  # Campiona i clade labels
+        else:
+            sampled_matrix = distance_matrix_dense
+            sampled_clade_labels = clade_labels
+
+        try: # Try to calculate the linkage
+            Z = linkage(sampled_matrix, 'ward')
+        except ValueError as e:
+            print(f"Error linkage calculate: {e}")
+            return
+
+        plt.figure(figsize=(15, 10)) # Set the figure size
+        dendrogram(Z, color_threshold=max_d, labels=sampled_clade_labels) # Plot the dendrogram
+        plt.title(f'Dendrogram_{file_name}') # Set the title
+        plt.xlabel('Sample') # Set the x label
+        plt.ylabel('Distance') # Set the y label
+
+        plt.savefig(os.path.join(plot_folder, f"Dendrogram_{file_name}.png")) # Save the plot
+        plt.close() # Close Plot
+        
+        # Clear memory
+        del distance_matrix_dense, sampled_matrix, sampled_clade_labels, Z
+        gc.collect()
